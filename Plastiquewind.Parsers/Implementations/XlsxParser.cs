@@ -11,7 +11,6 @@ using Plastiquewind.Parsers.Helpers;
 using Plastiquewind.Parsers.Implementations.Errors;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Spreadsheet;
-using DocumentFormat.OpenXml;
 using PommaLabs.Thrower;
 
 namespace Plastiquewind.Parsers.Implementations
@@ -34,167 +33,159 @@ namespace Plastiquewind.Parsers.Implementations
             var parsedEntities = new List<IXlsxParsedRow<T>>();
             var errors = new List<IError>();
 
-            IProcessingResult<IXlsxParserConfig<T>> configBuildingResult = configFactory.Create(stream);
-
-            if (configBuildingResult.Errors != null && configBuildingResult.Errors.Any())
-            {
-                return new ProcessingResult<IEnumerable<IXlsxParsedRow<T>>>(Enumerable.Empty<IXlsxParsedRow<T>>(), configBuildingResult.Errors);
-            }
-
-            IXlsxParserConfig<T> config = configBuildingResult.Result;
-            var firstRow = config.FirstRow;
-            var lastRow = config.LastRow;
-            var firstColumn = XlsxColumnAddressConverter.ToInt(config.FirstColumn);
-            var lastColumn = XlsxColumnAddressConverter.ToInt(config.LastColumn);
-            var firstSheet = config.FirstSheet;
-            var lastSheet = config.LastSheet;
-            var fieldsMap = config.FieldsMap;
-            var typeAccessor = config.TypeAccessor;
-            var valueConverter = config.ValueConverter;
-
             using (var spreadsheetDocument = SpreadsheetDocument.Open(stream, false))
             {
+                IProcessingResult<IXlsxParserConfig<T>> configBuildingResult = configFactory.Create(spreadsheetDocument);
+
+                if (configBuildingResult.Errors != null && configBuildingResult.Errors.Any())
+                {
+                    return new ProcessingResult<IEnumerable<IXlsxParsedRow<T>>>(Enumerable.Empty<IXlsxParsedRow<T>>(), configBuildingResult.Errors);
+                }
+
+                IXlsxParserConfig<T> config = configBuildingResult.Result;
+                var firstRow = config.FirstRow;
+                var lastRow = config.LastRow;
+                var firstColumn = XlsxColumnAddressConverter.ToInt(config.FirstColumn);
+                var lastColumn = XlsxColumnAddressConverter.ToInt(config.LastColumn);
+                var firstSheet = config.FirstSheet;
+                var lastSheet = config.LastSheet;
+                var fieldsMap = config.FieldsMap;
+                var typeAccessor = config.TypeAccessor;
+                var valueConverter = config.ValueConverter;
                 WorkbookPart workbookPart = spreadsheetDocument.WorkbookPart;
-                int currentWorksheetIndex = 0;
-                string[] sharedStrings = workbookPart.GetPartsOfType<SharedStringTablePart>()
+                SharedStringTable sharedStringTable = workbookPart.GetPartsOfType<SharedStringTablePart>()
                     .FirstOrDefault()?
-                    .SharedStringTable?
+                    .SharedStringTable;
+                string[] sharedStrings = sharedStringTable?
                     .Select(x => x.InnerText)?
                     .ToArray();
 
-                foreach (WorksheetPart worksheetPart in workbookPart.WorksheetParts)
+                sharedStringTable = null;
+
+                var sheets = workbookPart.Workbook.Descendants<Sheet>();
+                int sheetIndex = 0;
+
+                foreach (var sheet in sheets)
                 {
-                    if (currentWorksheetIndex < firstSheet)
+                    if (sheetIndex < firstSheet)
                     {
+                        sheetIndex++;
+
                         continue;
                     }
 
-                    string currentSheetName = workbookPart.Workbook.Descendants<Sheet>().ElementAt(currentWorksheetIndex).Name;
+                    string currentSheetName = sheet.Name;
+                    WorksheetPart worksheetPart = (WorksheetPart)workbookPart.GetPartById(sheet.Id);
+                    Worksheet worksheet = worksheetPart.Worksheet;
+                    SheetData sheetData = worksheet.GetFirstChild<SheetData>();
+                    var rows = sheetData.Elements<Row>();
+                    var rowIndex = 0;
 
-                    using (OpenXmlReader reader = OpenXmlReader.Create(worksheetPart))
+                    foreach (var row in rows)
                     {
-                        while (reader.Read())
+                        var rowNumber = rowIndex + 1;
+
+                        if (rowNumber < firstRow)
                         {
-                            if (reader.ElementType != typeof(Row))
+                            rowIndex++;
+
+                            continue;
+                        }
+
+                        T entity = (T)Activator.CreateInstance(typeof(T));
+                        bool entityHasErrors = false;
+
+                        var cells = row.Elements<Cell>();
+                        var cellIndex = 0;
+
+                        foreach (var cell in cells)
+                        {
+                            int columnNumber = cellIndex + 1;
+
+                            if (columnNumber < firstColumn)
                             {
+                                cellIndex++;
+
                                 continue;
                             }
 
-                            do
+                            string column = XlsxColumnAddressConverter.ToString(columnNumber);
+
+                            if (!fieldsMap.Has(column))
                             {
-                                if (!reader.HasAttributes || reader.ElementType != typeof(Row))
+                                cellIndex++;
+
+                                continue;
+                            }
+
+                            string cellAddress = $"{column}{rowNumber}";
+                            IEntityField<T> entityField = fieldsMap[column];
+                            string rawValue = cell.InnerText;
+
+                            if (cell.DataType != null && cell.DataType.Value == CellValues.SharedString)
+                            {
+                                rawValue = sharedStrings[int.Parse(rawValue)];
+                            }
+                            else if (cell.CellFormula != null)
+                            {
+                                if (cell.CellValue == null)
                                 {
-                                    continue;
+                                    return new ProcessingResult<IEnumerable<IXlsxParsedRow<T>>>(Enumerable.Empty<IXlsxParsedRow<T>>(), new[] { new XlsxProtectedViewError() });
                                 }
 
-                                var rowNumber = int.Parse(reader.Attributes.First(a => a.LocalName == "r").Value);
+                                rawValue = cell.CellValue?.InnerText;
+                            }
 
-                                if (rowNumber < firstRow)
+                            if (cell.DataType != null && cell.DataType.Value == CellValues.Error)
+                            {
+                                if (entityField.Type.GetTypeInfo().IsValueType ? Activator.CreateInstance(entityField.Type) != null : false)
                                 {
-                                    continue;
+                                    errors.Add(new XlsxCellValueError(entityField.Description, cellAddress, currentSheetName, cell.CellValue.InnerText));
+                                    entityHasErrors = true;
                                 }
-
-                                if (rowNumber > lastRow)
+                                else
                                 {
-                                    break;
+                                    rawValue = string.Empty;
                                 }
+                            }
 
-                                var entity = (T)Activator.CreateInstance(typeof(T));
-                                bool entityHasErrors = false;
+                            if (valueConverter.TryConvert(rawValue, entityField.Type, out object value))
+                            {
+                                typeAccessor[entity, entityField.Name] = value;
+                            }
+                            else
+                            {
+                                errors.Add(new XlsxDataTypeError(entityField.Description, cellAddress, currentSheetName));
+                                entityHasErrors = true;
+                            }
 
-                                while (reader.Read())
-                                {
-                                    if (reader.ElementType == typeof(Row))
-                                    {
-                                        break;
-                                    }
+                            if (columnNumber == lastColumn)
+                            {
+                                break;
+                            }
 
-                                    if (reader.ElementType != typeof(Cell) && 
-                                        reader.ElementType != typeof(CellValue) ||
-                                        !reader.HasAttributes)
-                                    {
-                                        continue;
-                                    }
-
-                                    string cellAddress = reader.Attributes.First(a => a.LocalName == "r").Value;
-                                    string column = cellAddress.Replace(rowNumber.ToString(), string.Empty);
-                                    var columnNumber = XlsxColumnAddressConverter.ToInt(column);
-
-                                    if (columnNumber < firstColumn)
-                                    {
-                                        continue;
-                                    }
-
-                                    if (columnNumber > lastColumn)
-                                    {
-                                        break;
-                                    }
-
-                                    if (!fieldsMap.Has(column))
-                                    {
-                                        continue;
-                                    }
-
-                                    IEntityField<T> entityField = fieldsMap[column];
-                                    Cell cell = (Cell)reader.LoadCurrentElement();
-
-                                    string rawValue = cell.InnerText;
-
-                                    if (cell.DataType != null && cell.DataType.Value == CellValues.SharedString)
-                                    {
-                                        rawValue = sharedStrings[int.Parse(rawValue)];
-                                    }
-                                    else if (cell.CellFormula != null)
-                                    {
-                                        if (cell.CellValue == null)
-                                        {
-                                            errors.Add(new XlsxProtectedViewError());
-                                            entityHasErrors = true;
-
-                                            return new ProcessingResult<IEnumerable<IXlsxParsedRow<T>>>(Enumerable.Empty<IXlsxParsedRow<T>>(), new[] { new XlsxProtectedViewError() });
-                                        }
-
-                                        rawValue = cell.CellValue?.InnerText;
-                                    }
-
-                                    if (cell.DataType != null && cell.DataType.Value == CellValues.Error)
-                                    {
-                                        if (entityField.Type.GetTypeInfo().IsValueType ? Activator.CreateInstance(entityField.Type) != null : false)
-                                        {
-                                            errors.Add(new XlsxCellValueError(entityField.Description, cellAddress, currentSheetName, cell.CellValue.InnerText));
-                                            entityHasErrors = true;
-                                        }
-                                        else
-                                        {
-                                            rawValue = string.Empty;
-                                        }
-                                    }
-
-                                    if (valueConverter.TryConvert(rawValue, entityField.Type, out object value))
-                                    {
-                                        typeAccessor[entity, entityField.Name] = value;
-                                    }
-                                    else
-                                    {
-                                        errors.Add(new XlsxDataTypeError(entityField.Description, cellAddress, currentSheetName));
-                                        entityHasErrors = true;
-                                    }
-                                }
-
-                                if (!entityHasErrors)
-                                {
-                                    parsedEntities.Add(new XlsxParsedRow<T>(rowNumber, currentSheetName, entity));
-                                }
-                            } while (reader.ReadNextSibling());
+                            cellIndex++;
                         }
+
+                        if (!entityHasErrors)
+                        {
+                            parsedEntities.Add(new XlsxParsedRow<T>(rowNumber, currentSheetName, entity));
+                        }
+
+                        if (rowNumber == lastRow)
+                        {
+                            break;
+                        }
+
+                        rowIndex++;
                     }
 
-                    if (currentWorksheetIndex == lastSheet)
+                    if (sheetIndex == lastSheet)
                     {
                         break;
                     }
 
-                    currentWorksheetIndex++;
+                    sheetIndex++;
                 }
             }
 
