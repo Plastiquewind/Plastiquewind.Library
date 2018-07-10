@@ -63,7 +63,7 @@ namespace Plastiquewind.Parsers.Implementations
                 sharedStringTable = null;
 
                 var sheets = workbookPart.Workbook.Descendants<Sheet>();
-                int sheetIndex = 0;
+                int sheetIndex = 1;
 
                 foreach (var sheet in sheets)
                 {
@@ -100,7 +100,22 @@ namespace Plastiquewind.Parsers.Implementations
 
                         foreach (var cell in cells)
                         {
-                            int columnNumber = cellIndex + 1;
+                            string cellAddress;
+                            int columnNumber;
+                            string column;
+
+                            if (!string.IsNullOrEmpty(cell.CellReference))
+                            {
+                                cellAddress = cell.CellReference;
+                                column = cellAddress.Replace(rowNumber.ToString(), string.Empty);
+                                columnNumber = XlsxColumnAddressConverter.ToInt(column);
+                            }
+                            else
+                            {
+                                columnNumber = cellIndex + 1;
+                                column = XlsxColumnAddressConverter.ToString(columnNumber);
+                                cellAddress = $"{column}{rowNumber}";
+                            }
 
                             if (columnNumber < firstColumn)
                             {
@@ -109,8 +124,6 @@ namespace Plastiquewind.Parsers.Implementations
                                 continue;
                             }
 
-                            string column = XlsxColumnAddressConverter.ToString(columnNumber);
-
                             if (!fieldsMap.Has(column))
                             {
                                 cellIndex++;
@@ -118,7 +131,6 @@ namespace Plastiquewind.Parsers.Implementations
                                 continue;
                             }
 
-                            string cellAddress = $"{column}{rowNumber}";
                             IEntityField<T> entityField = fieldsMap[column];
                             string rawValue = cell.InnerText;
 

@@ -1,8 +1,10 @@
-﻿using Plastiquewind.Base.Abstractions;
+﻿using System.Collections;
+using Plastiquewind.Base.Abstractions;
+using Plastiquewind.Base.Implementations;
+using Plastiquewind.Base.Helpers;
 using Plastiquewind.Validation.Abstractions;
 using Plastiquewind.Validation.Implementations.Errors;
 using FastMember;
-using Plastiquewind.Base.Implementations;
 using PommaLabs.Thrower;
 
 namespace Plastiquewind.Validation.Implementations.Rules
@@ -23,7 +25,8 @@ namespace Plastiquewind.Validation.Implementations.Rules
 
         public virtual IProcessingResult<bool> Check(T entity)
         {
-            if (typeAccessor[entity, Field.Name] == null)
+            if (typeAccessor[entity, Field.Name] == null ||
+                typeAccessor[entity, Field.Name] is IEnumerable enumerable && enumerable.Count() == 0)
             {
                 return new ProcessingResult<bool>(false, new[] { new RequiredFieldError(Field.Description) });
             }
